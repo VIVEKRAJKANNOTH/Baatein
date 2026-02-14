@@ -1,0 +1,15 @@
+# macOS junk
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Environment variables (API keys!)
+.env
+
+# IDE
+.vscode/
+.idea/
