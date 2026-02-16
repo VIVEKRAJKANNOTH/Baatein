@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy Backend Code
 COPY app/ ./app/
-COPY modules/ ./modules/
+    # Copy modules removed as it is not used directly by app
 # Copy built Frontend assets from builder stage
 COPY --from=frontend-builder /app/ui/dist ./ui/dist
 
