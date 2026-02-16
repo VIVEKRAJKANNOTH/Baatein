@@ -7,10 +7,6 @@ const VAD_SILENCE_DURATION = 2000; // ms
 const VAD_SPEECH_CONFIRM_MS = 300;
 const VAD_BARGE_CONFIRM_MS = 500;
 
-// Feature detect: MSE with audio/mpeg support (fails on iOS Safari)
-const CAN_USE_MSE = typeof MediaSource !== 'undefined' &&
-    MediaSource.isTypeSupported?.('audio/mpeg');
-
 export const useVoiceAgent = () => {
     const {
         setStatus, setTranscript, setAiResponse, setAudioLevel,
@@ -21,7 +17,7 @@ export const useVoiceAgent = () => {
     const audioContext = useRef<AudioContext | null>(null);
     const processor = useRef<ScriptProcessorNode | null>(null);
     const mediaStream = useRef<MediaStream | null>(null);
-    const sourceNode = useRef<MediaStreamAudioSourceNode | null>(null);
+    const sourceNode = useRef<MediaStreamAudioSourceNode | null>(null); // To close source
 
     // VAD State Refs
     const vadState = useRef({
@@ -33,19 +29,12 @@ export const useVoiceAgent = () => {
         aiIsPlaying: false,
     });
 
-    // MSE State (desktop path)
+    // MSE State
     const mseState = useRef({
         mediaSource: null as MediaSource | null,
         sourceBuffer: null as SourceBuffer | null,
         queue: [] as ArrayBuffer[],
         isAppending: false,
-        ttsDone: false,
-    });
-
-    // Fallback State (iOS path) - accumulate chunks, play as blob
-    const fallbackState = useRef({
-        chunks: [] as ArrayBuffer[],
-        audioEl: null as HTMLAudioElement | null,
         ttsDone: false,
     });
 
@@ -59,32 +48,6 @@ export const useVoiceAgent = () => {
         };
     }, []);
 
-    // ─── Fallback (iOS): play accumulated chunks as a blob ───
-    const fallbackPlayChunks = useCallback(() => {
-        const state = fallbackState.current;
-        if (state.chunks.length === 0) return;
-
-        const blob = new Blob(state.chunks, { type: 'audio/mpeg' });
-        const url = URL.createObjectURL(blob);
-        state.chunks = [];
-
-        const audio = new Audio();
-        audio.src = url;
-        state.audioEl = audio;
-
-        audio.onended = () => {
-            URL.revokeObjectURL(url);
-            state.audioEl = null;
-            if (state.ttsDone) {
-                vadState.current.aiIsPlaying = false;
-                setStatus('listening');
-                setTranscript('');
-            }
-        };
-
-        audio.play().catch(e => console.warn('iOS playback error:', e));
-    }, [setStatus, setTranscript]);
-
     const stopAudioPlayback = useCallback(() => {
         vadState.current.aiIsPlaying = false;
 
@@ -92,15 +55,6 @@ export const useVoiceAgent = () => {
             audioPlayer.current.pause();
             audioPlayer.current.src = '';
         }
-
-        // Stop fallback audio
-        if (fallbackState.current.audioEl) {
-            fallbackState.current.audioEl.pause();
-            fallbackState.current.audioEl.src = '';
-            fallbackState.current.audioEl = null;
-        }
-        fallbackState.current.chunks = [];
-        fallbackState.current.ttsDone = false;
 
         // Close MSE
         try {
@@ -133,6 +87,7 @@ export const useVoiceAgent = () => {
         setAiResponse('');
         setStatus('listening');
 
+        // Reset VAD immediately so we don't trigger silence too soon
         vadState.current.isSpeaking = true;
         vadState.current.speechConfirmed = true;
         vadState.current.speechStart = performance.now();
@@ -140,7 +95,7 @@ export const useVoiceAgent = () => {
         vadState.current.silenceSent = false;
     }, [stopAudioPlayback, setAiResponse, setStatus]);
 
-    // ─── MSE Logic (desktop path, unchanged) ───
+    // MSE Logic
     const initMediaSource = useCallback(() => {
         mseState.current.queue = [];
         mseState.current.isAppending = false;
@@ -201,6 +156,7 @@ export const useVoiceAgent = () => {
                 state.mediaSource.endOfStream();
             } catch (e) { /* ignore */ }
 
+            // When audio finishes playing naturally
             if (audioPlayer.current) {
                 audioPlayer.current.onended = () => {
                     vadState.current.aiIsPlaying = false;
@@ -211,7 +167,6 @@ export const useVoiceAgent = () => {
         }
     }, [setStatus, setTranscript]);
 
-    // ─── Connect ───
     const connect = useCallback(() => {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -242,7 +197,7 @@ export const useVoiceAgent = () => {
                     let sumSq = 0;
                     for (let i = 0; i < input.length; i++) sumSq += input[i] * input[i];
                     const rms = Math.sqrt(sumSq / input.length);
-                    setAudioLevel(rms);
+                    setAudioLevel(rms); // Updates UI orb
 
                     // 2. VAD Logic
                     const now = performance.now();
@@ -257,6 +212,7 @@ export const useVoiceAgent = () => {
                             s.silenceStart = 0;
                             s.silenceSent = false;
 
+                            // Barge-in check
                             if (s.aiIsPlaying && (now - s.speechStart > VAD_BARGE_CONFIRM_MS)) {
                                 bargeIn();
                             }
@@ -266,9 +222,10 @@ export const useVoiceAgent = () => {
                         if (s.speechConfirmed) {
                             s.speechConfirmed = false;
                             s.isSpeaking = false;
-                            s.silenceStart = now;
+                            s.silenceStart = now; // Start silence timer
                         }
 
+                        // Trigger LLM after silence duration
                         if (s.silenceStart && !s.silenceSent && !s.aiIsPlaying) {
                             if (now - s.silenceStart > VAD_SILENCE_DURATION) {
                                 console.log("🎯 VAD Silence detected -> Sending trigger");
@@ -279,13 +236,16 @@ export const useVoiceAgent = () => {
                         }
                     }
 
-                    // 3. Send Audio (Float32 -> Int16 -> Base64)
+                    // 3. Send Audio
+                    // Convert Float32 to Int16
                     const pcmData = new Int16Array(input.length);
                     for (let i = 0; i < input.length; i++) {
                         const s = Math.max(-1, Math.min(1, input[i]));
                         pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
 
+                    // Helper to convert Int16 to Base64
+                    // (Using FileReader is async, simplistic binary string approach for speed here)
                     let binary = '';
                     const bytes = new Uint8Array(pcmData.buffer);
                     const len = bytes.byteLength;
@@ -323,59 +283,42 @@ export const useVoiceAgent = () => {
 
                 case 'tts_start':
                     vadState.current.aiIsPlaying = true;
-                    if (CAN_USE_MSE) {
-                        initMediaSource();
-                    } else {
-                        fallbackState.current.chunks = [];
-                        fallbackState.current.ttsDone = false;
-                    }
+                    initMediaSource();
                     setStatus('speaking');
                     break;
 
-                case 'audio_chunk': {
-                    const bin = atob(msg.audio);
-                    const bytes = new Uint8Array(bin.length);
-                    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                case 'audio_chunk':
+                    // Decode Base64 -> ArrayBuffer
+                    const binary = atob(msg.audio);
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
-                    if (CAN_USE_MSE) {
-                        mseState.current.queue.push(bytes.buffer);
-                        appendNextChunk();
-                    } else {
-                        fallbackState.current.chunks.push(bytes.buffer);
-                    }
+                    mseState.current.queue.push(bytes.buffer);
+                    appendNextChunk();
 
                     if (msg.chunk_num === 1) setStatus('speaking');
                     break;
-                }
 
                 case 'search_start':
-                    setStatus('thinking');
+                    setStatus('thinking'); // orb should spin
                     break;
 
                 case 'search_audio_done':
-                    if (CAN_USE_MSE) {
-                        mseState.current.ttsDone = true;
-                        tryEndStream();
-                        setTimeout(() => {
-                            if (vadState.current.aiIsPlaying) initMediaSource();
-                        }, 500);
-                    } else {
-                        // Play accumulated search audio, then reset for next segment
-                        fallbackPlayChunks();
-                    }
+                    mseState.current.ttsDone = true;
+                    tryEndStream();
+                    // Allow small gap, then re-init for next part
+                    setTimeout(() => {
+                        if (vadState.current.aiIsPlaying) initMediaSource();
+                    }, 500);
                     break;
 
                 case 'tts_done':
-                    if (CAN_USE_MSE) {
-                        mseState.current.ttsDone = true;
-                        tryEndStream();
-                    } else {
-                        fallbackState.current.ttsDone = true;
-                        fallbackPlayChunks();
-                    }
+                    mseState.current.ttsDone = true;
+                    tryEndStream();
                     break;
 
                 case 'ping':
+                    // Keep-alive heartbeat
                     break;
 
                 case 'stop_audio':
@@ -390,7 +333,7 @@ export const useVoiceAgent = () => {
             setConnected(false);
             setStatus('idle');
         };
-    }, [bargeIn, appendNextChunk, tryEndStream, fallbackPlayChunks, setStatus, setTranscript, setAiResponse, setAudioLevel, setConnected, resetChat]);
+    }, [bargeIn, appendNextChunk, tryEndStream, setStatus, setTranscript, setAiResponse, setAudioLevel, setConnected, resetChat]);
 
     const disconnect = useCallback(() => {
         if (processor.current) {
