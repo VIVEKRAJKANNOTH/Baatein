@@ -1,9 +1,8 @@
 services:
   - type: web
     name: baatein-voice-agent
-    env: python
-    buildCommand: "pip install -r requirements.txt && cd ui && npm install && npm run build"
-    startCommand: "python -m app.server"
+    env: docker
+    plan: free
     envVars:
       - key: SARVAM_API_KEY
         sync: false
