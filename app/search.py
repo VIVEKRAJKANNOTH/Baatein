@@ -2,7 +2,7 @@
 search.py — DuckDuckGo web search and transcript cleanup.
 """
 
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 
 # ─── Filler words to strip from transcripts before searching ───
 FILLER_WORDS = {
