@@ -13,3 +13,10 @@ venv/
 # IDE
 .vscode/
 .idea/
+
+# Node
+node_modules/
+ui/node_modules/
+ui/dist/
+dist/
+.npm/
