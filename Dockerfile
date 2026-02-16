@@ -1,5 +1,5 @@
 # Build Stage for React Frontend
-FROM node:20-alpine AS frontend-builder
+FROM node:20-slim AS frontend-builder
 WORKDIR /app/ui
 COPY ui/package*.json ./
 RUN npm ci
