@@ -168,7 +168,9 @@ export const useVoiceAgent = () => {
     }, [setStatus, setTranscript]);
 
     const connect = useCallback(() => {
-        ws.current = new WebSocket('ws://localhost:8000/ws');
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        ws.current = new WebSocket(wsUrl);
 
         ws.current.onopen = async () => {
             setConnected(true);
